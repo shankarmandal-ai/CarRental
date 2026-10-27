@@ -4,7 +4,6 @@ import com.rental.exception.InvalidReservationException;
 import com.rental.exception.NoVehicleAvailableException;
 import com.rental.exception.ReservationNotFoundException;
 import com.rental.model.Reservation;
-import com.rental.model.ReservationStatus;
 import com.rental.model.Vehicle;
 import com.rental.model.VehicleType;
 import com.rental.repository.ReservationRepository;
@@ -50,7 +49,7 @@ public class RentalService {
                 throw new NoVehicleAvailableException(
                         "No " + type + " available for " + start + " to " + endTime);
             }
-            Reservation reservation = new Reservation(available.getId(), customerId, start, endTime);
+            Reservation reservation = new Reservation(available.getId(), type, customerId, start, endTime);
             reservationRepository.save(reservation);
             return reservation;
         } finally {
@@ -61,7 +60,14 @@ public class RentalService {
     public void cancel(String reservationId) {
         Reservation reservation = reservationRepository.findById(reservationId)
                 .orElseThrow(() -> new ReservationNotFoundException("No reservation with id " + reservationId));
-        reservation.cancel();
+
+        Lock lock = locksByType.get(reservation.getVehicleType());
+        lock.lock();
+        try {
+            reservationRepository.cancel(reservationId);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

@@ -38,7 +38,7 @@ and concurrency correctness, not I/O.
 │ VehicleRepository    │                          │ ReservationRepository │
 │  (interface)         │                          │  (interface)          │
 │  findByType(type)     │                          │  hasOverlap(id,s,e)   │
-│  addVehicle(v)        │                          │  save(r)              │
+│  addVehicle(v)        │                          │  save(r) / cancel(id) │
 └───────▲──────────────┘                          └───────────▲───────────┘
         │ implements                                           │ implements
 ┌───────┴──────────────┐                          ┌────────────┴───────────┐
@@ -206,7 +206,101 @@ on a `tsrange`) as the actual source of truth, with the in-memory lock
 (or no lock at all) only as an optimization to avoid hitting the DB with
 doomed requests.
 
-## 7. Validation and errors
+### Per-type vs. per-vehicle locking, revisited
+
+Per-vehicle locking is viable and strictly finer-grained than the per-type
+lock used here, *provided* the search loop never holds more than one
+vehicle's lock at a time: `tryLock` each candidate in turn, check its
+overlap under that lock, release it immediately whether or not it matched,
+and move to the next candidate on failure. Holding multiple candidate locks
+simultaneously while probing them is what creates lock-ordering deadlocks —
+but that's a self-inflicted implementation hazard, not an inherent property
+of per-vehicle locking. Per-type remains the simpler choice for this
+exercise's scale (a handful of vehicles per type, where contention is
+already low), but per-vehicle would give better throughput as fleet size per
+type grows, since it only serializes requests that actually contend for the
+*same* car rather than all requests for the *same type*.
+
+### Why `isAvailable` does not take the lock
+
+`isAvailable` is a pure read with no accompanying write, so taking the
+per-type lock around it buys nothing: the boolean it returns is stale the
+instant another thread books concurrently, regardless of whether the read
+itself was lock-protected. Locking it would only add contention with real
+`reserve` calls for no correctness gain. The consequence is explicit and
+accepted: a caller that does `isAvailable()` then `reserve()` can still get
+`NoVehicleAvailableException` despite having just seen "available" — this is
+the same TOCTOU gap that `reserve`'s own lock closes for the write path, and
+it cannot be closed across two separate calls without fusing them into one
+locked operation (which `reserve` already is). `isAvailable` is documented
+as advisory-only; the correct pattern for "try to book" is calling `reserve`
+directly and handling the exception, never pre-checking with `isAvailable`.
+
+### Why `ReadWriteLock` doesn't fit here
+
+A `ReadWriteLock` optimizes for workloads where many pure reads can overlap
+safely and only writes need exclusivity. `reserve`'s critical section isn't
+a pure read followed by a separate write — it's a read-modify-write, where
+the read's result (is there an unoverlapped vehicle) is only valid if
+nothing else can write between the read and the write. `ReentrantReadWriteLock`
+doesn't support upgrading a held read lock to a write lock without releasing
+it first, which reopens exactly the race window the lock exists to close. So
+using it for `reserve` would mean always taking the write lock anyway,
+gaining nothing over a plain `ReentrantLock`. The one place a pure-reader
+workload exists in this design (`isAvailable`) doesn't need stronger
+consistency than `ConcurrentHashMap` already provides for free, so there's
+no remaining read path that benefits from `ReadWriteLock`.
+
+## 7. Scaling the overlap query: `IntervalTree`
+
+`ReservationRepository.hasOverlap` is called once per fleet candidate inside
+`RentalService.findAvailableVehicle`'s loop, so its own cost compounds with
+fleet size. An early version scanned every reservation in the whole system
+and filtered by vehicle ID and overlap on each call — `O(V × R)` for `V`
+candidates and `R` total reservations, with `R` growing unboundedly over the
+system's lifetime.
+
+`InMemoryReservationRepository` now keeps one
+`com.rental.datastructure.IntervalTree` per vehicle instead: an augmented
+AVL tree keyed by `start`, where every node also stores `maxEnd` — the
+largest `end` value anywhere in its subtree. During a search, a subtree is
+pruned without being visited whenever its `maxEnd` cannot reach the query's
+`start`, which is what makes `hasOverlap` and `findOverlapping` run in
+`O(log r)` against that vehicle's own reservation count `r`, instead of
+scanning all of them, and independent of total system-wide reservation
+count `R`. Insert and remove are also `O(log r)`, via standard AVL
+rotations with `maxEnd` recomputed bottom-up along the rotation path.
+
+Cancelling a reservation (`ReservationRepository.cancel`) removes it from
+its vehicle's tree so a cancelled booking stops contributing to future
+overlap checks, rather than leaving a stale "cancelled but still indexed"
+entry that would require every read to re-check `isActive()`.
+
+A B-tree/B+tree was considered and rejected: those structures optimize for
+minimizing *disk page reads*, which is irrelevant for an all-in-memory
+system — the thing that matters here is comparison count and tree height,
+which a balanced in-memory tree already minimizes without any disk-oriented
+machinery. A plain `TreeMap<start, Reservation>` per vehicle was also
+considered; it gives `O(log r)` navigation but the overlap check itself
+still has to walk every entry in `headMap(end)` one at a time, which can be
+`O(r)` in the worst case regardless of how few of those entries actually
+overlap. The `maxEnd` augmentation is what gives the interval tree true
+`O(log r)` worst-case overlap queries regardless of booking density,
+independent of how many reservations happen to start before the query's
+`end`.
+
+`IntervalTree` is deliberately not thread-safe on its own — like a plain
+`TreeMap` would be, it relies on the caller (`RentalService`'s per-type
+lock) to serialize access, since a concurrent search and mutation of the
+same AVL tree could observe a tree mid-rotation.
+
+`IntervalTreeTest` includes a randomized cross-check (5,000 mixed
+insert/remove/query operations) comparing the tree's overlap answers
+against a brute-force linear scan over the same live intervals, to verify
+the AVL rotations and `maxEnd` augmentation stay correct under arbitrary
+mutation sequences, not just the hand-picked scenarios.
+
+## 8. Validation and errors
 
 `RentalService.reserve` validates before taking any lock: type and customer
 id required, start required, `endTime` required and after `start`. Violations throw
@@ -216,11 +310,14 @@ nonexistent reservation throws `ReservationNotFoundException`. All three are
 unchecked — this is an interview-scope simulation, not a library with a
 checked-exception contract.
 
-## 8. Test coverage (`src/test/java`)
+## 9. Test coverage (`src/test/java`)
 
 - `ReservationTest` — the overlap predicate itself: identical, partial-start,
   partial-end, boundary-touching (non-overlap), disjoint, invalid interval
   construction, cancel semantics.
+- `IntervalTreeTest` — insert/remove/overlap/findOverlapping correctness,
+  half-open boundary semantics, duplicate-id rejection, and a 5,000-iteration
+  randomized cross-check against brute-force linear scan.
 - `RentalServiceTest`:
   - happy path booking, distinct vehicles for concurrent non-conflicting
     requests of the same type
@@ -235,7 +332,7 @@ checked-exception contract.
 
 Run with `mvn test` (JDK 17+, Maven 3.9+).
 
-## 9. What I'd add for production (out of scope here)
+## 10. What I'd add for production (out of scope here)
 
 - Persistence with DB-enforced overlap exclusion (see §6) instead of/in
   addition to the in-memory lock.

@@ -9,6 +9,9 @@ import java.util.Optional;
 public interface ReservationRepository {
     void save(Reservation reservation);
 
+    /** Marks the reservation cancelled and removes it from any overlap index. */
+    void cancel(String reservationId);
+
     Optional<Reservation> findById(String id);
 
     List<Reservation> findByVehicleId(String vehicleId);

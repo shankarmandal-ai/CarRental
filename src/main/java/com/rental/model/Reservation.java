@@ -12,14 +12,17 @@ import java.util.UUID;
 public final class Reservation {
     private final String id;
     private final String vehicleId;
+    private final VehicleType vehicleType;
     private final String customerId;
     private final LocalDateTime start;
     private final LocalDateTime end;
     private volatile ReservationStatus status;
 
-    public Reservation(String vehicleId, String customerId, LocalDateTime start, LocalDateTime end) {
+    public Reservation(String vehicleId, VehicleType vehicleType, String customerId,
+                        LocalDateTime start, LocalDateTime end) {
         this.id = UUID.randomUUID().toString();
         this.vehicleId = Objects.requireNonNull(vehicleId, "vehicleId");
+        this.vehicleType = Objects.requireNonNull(vehicleType, "vehicleType");
         this.customerId = Objects.requireNonNull(customerId, "customerId");
         this.start = Objects.requireNonNull(start, "start");
         this.end = Objects.requireNonNull(end, "end");
@@ -35,6 +38,10 @@ public final class Reservation {
 
     public String getVehicleId() {
         return vehicleId;
+    }
+
+    public VehicleType getVehicleType() {
+        return vehicleType;
     }
 
     public String getCustomerId() {
@@ -68,7 +75,7 @@ public final class Reservation {
 
     @Override
     public String toString() {
-        return "Reservation{id='" + id + "', vehicleId='" + vehicleId + "', customerId='" + customerId
-                + "', start=" + start + ", end=" + end + ", status=" + status + "}";
+        return "Reservation{id='" + id + "', vehicleId='" + vehicleId + "', vehicleType=" + vehicleType
+                + ", customerId='" + customerId + "', start=" + start + ", end=" + end + ", status=" + status + "}";
     }
 }
