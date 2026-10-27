@@ -49,7 +49,7 @@ class RentalServiceTest {
 
     @Test
     void reservesAnAvailableVehicleOfRequestedType() {
-        Reservation reservation = rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, 3);
+        Reservation reservation = rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, BASE.plusDays(3));
 
         assertNotNull(reservation);
         assertEquals(BASE, reservation.getStart());
@@ -59,8 +59,8 @@ class RentalServiceTest {
 
     @Test
     void secondReservationOfSameTypeGetsDifferentVehicleWhenBothAvailable() {
-        Reservation r1 = rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, 2);
-        Reservation r2 = rentalService.reserve(VehicleType.SEDAN, "cust-2", BASE, 2);
+        Reservation r1 = rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, BASE.plusDays(2));
+        Reservation r2 = rentalService.reserve(VehicleType.SEDAN, "cust-2", BASE, BASE.plusDays(2));
 
         assertNotEqualsVehicle(r1, r2);
     }
@@ -71,86 +71,92 @@ class RentalServiceTest {
 
     @Test
     void throwsWhenFleetOfTypeIsExhaustedForOverlappingPeriod() {
-        rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, 2); // sedan-1 or sedan-2
-        rentalService.reserve(VehicleType.SEDAN, "cust-2", BASE, 2); // the other sedan
+        rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, BASE.plusDays(2)); // sedan-1 or sedan-2
+        rentalService.reserve(VehicleType.SEDAN, "cust-2", BASE, BASE.plusDays(2)); // the other sedan
 
         assertThrows(NoVehicleAvailableException.class,
-                () -> rentalService.reserve(VehicleType.SEDAN, "cust-3", BASE, 2));
+                () -> rentalService.reserve(VehicleType.SEDAN, "cust-3", BASE, BASE.plusDays(2)));
     }
 
     @Test
     void onlyOneVanExistsSoSecondOverlappingVanRequestFails() {
-        rentalService.reserve(VehicleType.VAN, "cust-1", BASE, 5);
+        rentalService.reserve(VehicleType.VAN, "cust-1", BASE, BASE.plusDays(5));
 
         assertThrows(NoVehicleAvailableException.class,
-                () -> rentalService.reserve(VehicleType.VAN, "cust-2", BASE.plusDays(1), 1));
+                () -> rentalService.reserve(VehicleType.VAN, "cust-2", BASE.plusDays(1), BASE.plusDays(2)));
     }
 
     @Test
     void sameVehicleCanBeReusedOnceReservationPeriodEnds() {
         // Only one VAN in the fleet.
-        rentalService.reserve(VehicleType.VAN, "cust-1", BASE, 2); // occupies [BASE, BASE+2)
+        rentalService.reserve(VehicleType.VAN, "cust-1", BASE, BASE.plusDays(2)); // occupies [BASE, BASE+2)
 
         // Starts exactly when the previous reservation ends -> no overlap (half-open interval).
-        Reservation r2 = rentalService.reserve(VehicleType.VAN, "cust-2", BASE.plusDays(2), 3);
+        Reservation r2 = rentalService.reserve(VehicleType.VAN, "cust-2", BASE.plusDays(2), BASE.plusDays(5));
 
         assertEquals("van-1", r2.getVehicleId());
     }
 
     @Test
     void partiallyOverlappingRequestIsRejectedForSingleVehicleType() {
-        rentalService.reserve(VehicleType.VAN, "cust-1", BASE, 3); // [BASE, BASE+3)
+        rentalService.reserve(VehicleType.VAN, "cust-1", BASE, BASE.plusDays(3)); // [BASE, BASE+3)
 
         // Overlaps by one day at the end.
         assertThrows(NoVehicleAvailableException.class,
-                () -> rentalService.reserve(VehicleType.VAN, "cust-2", BASE.plusDays(2), 2));
+                () -> rentalService.reserve(VehicleType.VAN, "cust-2", BASE.plusDays(2), BASE.plusDays(4)));
     }
 
     @Test
     void cancellingAReservationFreesTheVehicle() {
-        Reservation r1 = rentalService.reserve(VehicleType.VAN, "cust-1", BASE, 3);
+        Reservation r1 = rentalService.reserve(VehicleType.VAN, "cust-1", BASE, BASE.plusDays(3));
 
         rentalService.cancel(r1.getId());
 
-        Reservation r2 = rentalService.reserve(VehicleType.VAN, "cust-2", BASE, 3);
+        Reservation r2 = rentalService.reserve(VehicleType.VAN, "cust-2", BASE, BASE.plusDays(3));
         assertEquals("van-1", r2.getVehicleId());
     }
 
     @Test
     void isAvailableReflectsCurrentBookings() {
-        assertTrue(rentalService.isAvailable(VehicleType.SUV, BASE, 1));
+        assertTrue(rentalService.isAvailable(VehicleType.SUV, BASE, BASE.plusDays(1)));
 
-        rentalService.reserve(VehicleType.SUV, "cust-1", BASE, 1);
+        rentalService.reserve(VehicleType.SUV, "cust-1", BASE, BASE.plusDays(1));
 
-        assertFalse(rentalService.isAvailable(VehicleType.SUV, BASE, 1));
+        assertFalse(rentalService.isAvailable(VehicleType.SUV, BASE, BASE.plusDays(1)));
     }
 
     @Test
     void rejectsNonPositiveDuration() {
         assertThrows(InvalidReservationException.class,
-                () -> rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, 0));
+                () -> rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, BASE));
         assertThrows(InvalidReservationException.class,
-                () -> rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, -1));
+                () -> rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, BASE.minusDays(1)));
     }
 
     @Test
     void rejectsMissingCustomerId() {
         assertThrows(InvalidReservationException.class,
-                () -> rentalService.reserve(VehicleType.SEDAN, " ", BASE, 1));
+                () -> rentalService.reserve(VehicleType.SEDAN, " ", BASE, BASE.plusDays(1)));
         assertThrows(InvalidReservationException.class,
-                () -> rentalService.reserve(VehicleType.SEDAN, null, BASE, 1));
+                () -> rentalService.reserve(VehicleType.SEDAN, null, BASE, BASE.plusDays(1)));
     }
 
     @Test
     void rejectsMissingType() {
         assertThrows(InvalidReservationException.class,
-                () -> rentalService.reserve(null, "cust-1", BASE, 1));
+                () -> rentalService.reserve(null, "cust-1", BASE, BASE.plusDays(1)));
     }
 
     @Test
     void rejectsMissingStart() {
         assertThrows(InvalidReservationException.class,
-                () -> rentalService.reserve(VehicleType.SEDAN, "cust-1", null, 1));
+                () -> rentalService.reserve(VehicleType.SEDAN, "cust-1", null, BASE.plusDays(1)));
+    }
+
+    @Test
+    void rejectsMissingEndTime() {
+        assertThrows(InvalidReservationException.class,
+                () -> rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, null));
     }
 
     /**
@@ -177,7 +183,7 @@ class RentalServiceTest {
                 readyLatch.countDown();
                 try {
                     startLatch.await();
-                    Reservation r = rentalService.reserve(VehicleType.VAN, customerId, BASE, 1);
+                    Reservation r = rentalService.reserve(VehicleType.VAN, customerId, BASE, BASE.plusDays(1));
                     wonVehicleIds.add(r.getVehicleId());
                     successCount.incrementAndGet();
                 } catch (NoVehicleAvailableException e) {
@@ -213,12 +219,12 @@ class RentalServiceTest {
         AtomicInteger successCount = new AtomicInteger(0);
 
         executor.submit(() -> {
-            rentalService.reserve(VehicleType.SEDAN, "cust-a", BASE, 1);
+            rentalService.reserve(VehicleType.SEDAN, "cust-a", BASE, BASE.plusDays(1));
             successCount.incrementAndGet();
             doneLatch.countDown();
         });
         executor.submit(() -> {
-            rentalService.reserve(VehicleType.VAN, "cust-b", BASE, 1);
+            rentalService.reserve(VehicleType.VAN, "cust-b", BASE, BASE.plusDays(1));
             successCount.incrementAndGet();
             doneLatch.countDown();
         });

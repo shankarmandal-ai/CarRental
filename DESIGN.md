@@ -52,7 +52,7 @@ and concurrency correctness, not I/O.
                        │  - locksByType: Map<Type,  │
                        │                   Lock>    │
                        │  + reserve(type, cust,     │
-                       │            start, days)    │
+                       │            start, endTime) │
                        │  + cancel(reservationId)   │
                        │  + isAvailable(type, s, d) │
                        └─────────────────────────┘
@@ -92,8 +92,8 @@ has zero active reservations overlapping the requested interval.**
 ## 4. Sequence diagram — successful reservation
 
 ```
-Customer -> RentalService: reserve(VAN, "cust-1", 2026-11-01T10:00, 3 days)
-RentalService -> RentalService: validate(type, customerId, start, days)
+Customer -> RentalService: reserve(VAN, "cust-1", 2026-11-01T10:00, 2026-11-04T10:00)
+RentalService -> RentalService: validate(type, customerId, start, endTime)
 RentalService -> locksByType[VAN]: lock()
 RentalService -> VehicleRepository: findByType(VAN)
 VehicleRepository --> RentalService: [van-1]
@@ -189,7 +189,7 @@ doomed requests.
 ## 7. Validation and errors
 
 `RentalService.reserve` validates before taking any lock: type and customer
-id required, start required, `days > 0`. Violations throw
+id required, start required, `endTime` required and after `start`. Violations throw
 `InvalidReservationException` (never silently coerced). No available vehicle
 after a valid request throws `NoVehicleAvailableException`. Cancelling a
 nonexistent reservation throws `ReservationNotFoundException`. All three are
@@ -209,7 +209,7 @@ checked-exception contract.
   - rejection of a partially-overlapping request
   - cancellation frees the vehicle
   - `isAvailable` reflects bookings
-  - input validation (type, customer id, start, days)
+  - input validation (type, customer id, start, endTime)
   - **concurrency**: 50 threads racing for the single VAN — exactly one wins
   - **concurrency**: different types don't block each other
 

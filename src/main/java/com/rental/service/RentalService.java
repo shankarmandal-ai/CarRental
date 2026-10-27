@@ -39,19 +39,18 @@ public class RentalService {
         }
     }
 
-    public Reservation reserve(VehicleType type, String customerId, LocalDateTime start, int days) {
-        validate(type, customerId, start, days);
-        LocalDateTime end = start.plusDays(days);
+    public Reservation reserve(VehicleType type, String customerId, LocalDateTime start, LocalDateTime endTime) {
+        validate(type, customerId, start, endTime);
 
         Lock lock = locksByType.get(type);
         lock.lock();
         try {
-            Vehicle available = findAvailableVehicle(type, start, end);
+            Vehicle available = findAvailableVehicle(type, start, endTime);
             if (available == null) {
                 throw new NoVehicleAvailableException(
-                        "No " + type + " available for " + start + " to " + end);
+                        "No " + type + " available for " + start + " to " + endTime);
             }
-            Reservation reservation = new Reservation(available.getId(), customerId, start, end);
+            Reservation reservation = new Reservation(available.getId(), customerId, start, endTime);
             reservationRepository.save(reservation);
             return reservation;
         } finally {
@@ -65,12 +64,11 @@ public class RentalService {
         reservation.cancel();
     }
 
-    public boolean isAvailable(VehicleType type, LocalDateTime start, int days) {
-        LocalDateTime end = start.plusDays(days);
+    public boolean isAvailable(VehicleType type, LocalDateTime start, LocalDateTime endTime) {
         Lock lock = locksByType.get(type);
         lock.lock();
         try {
-            return findAvailableVehicle(type, start, end) != null;
+            return findAvailableVehicle(type, start, endTime) != null;
         } finally {
             lock.unlock();
         }
@@ -86,7 +84,7 @@ public class RentalService {
         return null;
     }
 
-    private void validate(VehicleType type, String customerId, LocalDateTime start, int days) {
+    private void validate(VehicleType type, String customerId, LocalDateTime start, LocalDateTime endTime) {
         if (type == null) {
             throw new InvalidReservationException("Vehicle type is required");
         }
@@ -96,8 +94,11 @@ public class RentalService {
         if (start == null) {
             throw new InvalidReservationException("Start date/time is required");
         }
-        if (days <= 0) {
-            throw new InvalidReservationException("Number of days must be positive");
+        if (endTime == null) {
+            throw new InvalidReservationException("End date/time is required");
+        }
+        if (!endTime.isAfter(start)) {
+            throw new InvalidReservationException("End date/time must be after start date/time");
         }
     }
 }
