@@ -64,14 +64,14 @@ public class RentalService {
         reservation.cancel();
     }
 
+    /**
+     * Advisory read only — does not take the per-type lock. The result is stale the
+     * instant it's returned if another thread books concurrently, so this must never be
+     * used as a precondition for a subsequent reserve() call; call reserve() directly and
+     * handle NoVehicleAvailableException instead.
+     */
     public boolean isAvailable(VehicleType type, LocalDateTime start, LocalDateTime endTime) {
-        Lock lock = locksByType.get(type);
-        lock.lock();
-        try {
-            return findAvailableVehicle(type, start, endTime) != null;
-        } finally {
-            lock.unlock();
-        }
+        return findAvailableVehicle(type, start, endTime) != null;
     }
 
     private Vehicle findAvailableVehicle(VehicleType type, LocalDateTime start, LocalDateTime end) {

@@ -132,15 +132,35 @@ with 50 threads instead of 2.
 
 ## 6. Locking: what, where, and why
 
-**Where locking is NOT needed:** pure read-only availability *browsing* that a
-customer does before deciding what to book doesn't need to hold a lock — it's
-inherently stale the instant another customer books concurrently, and the
-`isAvailable` check is advisory only. The lock only has to protect the
-*transition* from "decide which vehicle to assign" to "record that
-assignment" — i.e. the critical section inside `reserve(...)`, not the whole
-search-then-browse experience. `isAvailable` happens to take the same lock
-here for a consistent read, but that's a convenience, not a requirement — a
-stale read of availability is a UX nicety, not a correctness issue.
+**Where locking is NOT needed:** `isAvailable` does not take the per-type
+lock. It is a pure read-only query — "is there a free vehicle of this type
+right now" — used for browsing before a customer decides what to book. The
+lock only has to protect the *transition* from "decide which vehicle to
+assign" to "record that assignment," i.e. the critical section inside
+`reserve(...)`; it buys nothing for a call that doesn't write.
+
+This was a deliberate choice, not an oversight, and it has a real
+consequence worth stating plainly: **the boolean `isAvailable` returns can
+be stale by the time the caller acts on it.** Thread A can call
+`isAvailable(VAN, ...)`, get `true`, and before it calls `reserve`, Thread B
+can book the last VAN — A's `reserve` call then throws
+`NoVehicleAvailableException` despite the "available" answer moments
+earlier. This is the same TOCTOU (time-of-check to time-of-use) gap that the
+lock in `reserve` exists to close for the *write* path, and taking the lock
+in `isAvailable` would not close it for the *read-then-write* path either,
+because the lock is released before the caller gets the boolean back — there
+is no way for a separate, later `reserve()` call to observe the same
+lock-protected critical section unless it's literally the same critical
+section (i.e. unless `isAvailable` and `reserve` were fused into one locked
+call). So locking `isAvailable` would add lock contention (now competing
+with real bookings of the same type) while providing zero additional
+correctness guarantee to callers who check-then-book across two calls.
+
+The right way to treat `isAvailable` is as what its doc comment says: a UX
+hint for building a search/browse screen, never a precondition for
+`reserve`. The correct pattern for "try to book" is to call `reserve`
+directly and handle `NoVehicleAvailableException`, since that call alone
+holds the lock across the only check that matters.
 
 **Granularity: per vehicle-type, not global, not per-vehicle.**
 
