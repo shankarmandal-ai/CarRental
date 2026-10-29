@@ -13,6 +13,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -24,11 +25,17 @@ import java.util.concurrent.locks.ReentrantLock;
  * (classic check-then-act race). We serialize that critical section per VehicleType
  * using a dedicated lock per type, so bookings for SEDAN never block bookings for VAN.
  * The lock protects the decision (which vehicle to assign), not the whole system.
+ *
+ * Startup gate: readyLatch blocks every public operation (reserve/cancel/isAvailable)
+ * until markReady() is called, so a fleet load running on a separate thread (see
+ * com.rental.Main) can't race with callers that start hitting this service before the
+ * initial data is in place. It's a one-shot gate, not reusable for pausing later.
  */
 public class RentalService {
     private final VehicleRepository vehicleRepository;
     private final ReservationRepository reservationRepository;
     private final Map<VehicleType, Lock> locksByType = new ConcurrentHashMap<>();
+    private final CountDownLatch readyLatch = new CountDownLatch(1);
 
     public RentalService(VehicleRepository vehicleRepository, ReservationRepository reservationRepository) {
         this.vehicleRepository = vehicleRepository;
@@ -38,7 +45,13 @@ public class RentalService {
         }
     }
 
+    /** Releases every thread blocked in reserve/cancel/isAvailable. Call once, after the initial fleet load completes. */
+    public void markReady() {
+        readyLatch.countDown();
+    }
+
     public Reservation reserve(VehicleType type, String customerId, LocalDateTime start, LocalDateTime endTime) {
+        awaitReady();
         validate(type, customerId, start, endTime);
 
         Lock lock = locksByType.get(type);
@@ -58,6 +71,7 @@ public class RentalService {
     }
 
     public void cancel(String reservationId) {
+        awaitReady();
         Reservation reservation = reservationRepository.findById(reservationId)
                 .orElseThrow(() -> new ReservationNotFoundException("No reservation with id " + reservationId));
 
@@ -77,7 +91,17 @@ public class RentalService {
      * handle NoVehicleAvailableException instead.
      */
     public boolean isAvailable(VehicleType type, LocalDateTime start, LocalDateTime endTime) {
+        awaitReady();
         return findAvailableVehicle(type, start, endTime) != null;
+    }
+
+    private void awaitReady() {
+        try {
+            readyLatch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for fleet load to complete", e);
+        }
     }
 
     private Vehicle findAvailableVehicle(VehicleType type, LocalDateTime start, LocalDateTime end) {

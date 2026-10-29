@@ -366,18 +366,54 @@ across any future change to `IntervalTree`'s shape and wouldn't buy
 anything, since rebuilding from the flat list is already `O(r log r)` per
 vehicle and runs once at startup.
 
-`Main` wires this at the process boundary: it loads the snapshot (if the
-file exists; a missing file is a no-op, not an error) before constructing
-`RentalService`, and registers a JVM shutdown hook that saves current state
-back to the same path on exit — including `Ctrl+C`/`SIGTERM`, not just a
-normal return from `main`. This is a best-effort save, not a transaction
-log: a hard kill (`kill -9`) or a crash between bookings and the next save
-loses whatever happened since the last successful save, which is acceptable
-for this exercise but would need a real write-ahead approach (e.g. append
-each booking/cancellation as it happens, rather than snapshotting the whole
-fleet at exit) for anything production-grade — see §11.
+`Main` wires this at the process boundary: it constructs `RentalService`
+immediately, then loads the snapshot (if the file exists; a missing file is
+a no-op, not an error) on a separate thread so startup isn't blocked on
+disk I/O, and registers a JVM shutdown hook that saves current state back
+to the same path on exit — including `Ctrl+C`/`SIGTERM`, not just a normal
+return from `main`. This is a best-effort save, not a transaction log: a
+hard kill (`kill -9`) or a crash between bookings and the next save loses
+whatever happened since the last successful save, which is acceptable for
+this exercise but would need a real write-ahead approach (e.g. append each
+booking/cancellation as it happens, rather than snapshotting the whole
+fleet at exit) for anything production-grade — see §12.
 
-## 9. Validation and errors
+## 9. Startup gate: `CountDownLatch`
+
+Loading the snapshot asynchronously (§8) opens a real race: `RentalService`
+is reachable the instant it's constructed, but the fleet it operates on is
+still being populated on another thread. A `reserve`/`cancel`/`isAvailable`
+call that lands during that window would see a partially-loaded (or
+entirely empty) fleet — not a corrupted one, since `VehicleRepository` and
+`ReservationRepository` are internally thread-safe for individual
+operations, but a *semantically wrong* one: a customer could get
+`NoVehicleAvailableException` for a van that's actually in the snapshot but
+just hasn't been read yet.
+
+`RentalService` holds a `CountDownLatch readyLatch` initialized to `1`.
+Every public operation calls `readyLatch.await()` as its first step, before
+validation or locking. `Main`'s loader thread calls
+`rentalService.markReady()` only after `FleetSnapshot.load` returns, which
+counts the latch down to zero and permanently releases every blocked (and
+every future) caller. `CountDownLatch` fits this specifically because it's
+a one-shot gate — it can't be reset or re-closed, which matches "not ready"
+→ "ready" being a single, irreversible phase transition for the lifetime of
+one `RentalService` instance. It would be the wrong tool for a *recurring*
+pause (e.g. "block new reservations during a maintenance window, then allow
+them again") since that needs a gate that can reopen and re-close, which a
+`CountDownLatch` structurally cannot do — that would call for something
+like a toggled flag checked under a lock, or a fresh latch created per
+pause window.
+
+`RentalServiceTest.operationsBlockUntilMarkReadyIsCalled` proves the gate
+actually blocks: it starts a caller thread against a fresh, not-yet-ready
+`RentalService`, confirms the call is still blocked after a short wait,
+calls `markReady()`, and confirms the call then completes and returns the
+expected result — not just that the API compiles, but that a concurrent
+caller genuinely stalls and is genuinely released.
+
+## 10. Validation and errors
+
 
 `RentalService.reserve` validates before taking any lock: type and customer
 id required, start required, `endTime` required and after `start`. Violations throw
@@ -387,7 +423,7 @@ nonexistent reservation throws `ReservationNotFoundException`. All three are
 unchecked — this is an interview-scope simulation, not a library with a
 checked-exception contract.
 
-## 10. Test coverage (`src/test/java`)
+## 11. Test coverage (`src/test/java`)
 
 - `ReservationTest` — the overlap predicate itself: identical, partial-start,
   partial-end, boundary-touching (non-overlap), disjoint, invalid interval
@@ -410,10 +446,12 @@ checked-exception contract.
   - input validation (type, customer id, start, endTime)
   - **concurrency**: 50 threads racing for the single VAN — exactly one wins
   - **concurrency**: different types don't block each other
+  - **concurrency**: a caller blocks on `reserve`/`isAvailable`/`cancel`
+    until `markReady()` is called, then completes correctly once released
 
 Run with `mvn test` (JDK 17+, Maven 3.9+).
 
-## 11. What I'd add for production (out of scope here)
+## 12. What I'd add for production (out of scope here)
 
 - A real write-ahead persistence mechanism (append each booking/cancellation
   as it happens) instead of a best-effort snapshot-on-exit (see §8), plus

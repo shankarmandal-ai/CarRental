@@ -13,6 +13,12 @@ import java.nio.file.Paths;
 /**
  * Wires the repositories, loads any existing fleet snapshot on startup, and saves the
  * current state back to the same file on shutdown (including Ctrl+C / normal exit).
+ *
+ * RentalService is constructed and reachable immediately; the snapshot load runs on a
+ * separate thread, and RentalService.markReady() is only called once it finishes. Any
+ * reserve/cancel/isAvailable call that comes in while loading is still in flight blocks
+ * on RentalService's internal CountDownLatch until the load completes, rather than
+ * racing against a partially-populated fleet.
  */
 public final class Main {
 
@@ -23,16 +29,20 @@ public final class Main {
 
         VehicleRepository vehicleRepository = new InMemoryVehicleRepository();
         ReservationRepository reservationRepository = new InMemoryReservationRepository(vehicleRepository);
-        FleetSnapshot.load(snapshotPath, vehicleRepository, reservationRepository);
-
         RentalService rentalService = new RentalService(vehicleRepository, reservationRepository);
+
+        Thread loader = new Thread(() -> {
+            FleetSnapshot.load(snapshotPath, vehicleRepository, reservationRepository);
+            rentalService.markReady();
+            System.out.println("Fleet loaded from " + snapshotPath.toAbsolutePath()
+                    + " (" + vehicleRepository.findAll().size() + " vehicles). RentalService is now accepting requests.");
+        }, "fleet-loader");
+        loader.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() ->
                 FleetSnapshot.save(snapshotPath, vehicleRepository, reservationRepository)));
 
-        System.out.println("Fleet loaded from " + snapshotPath.toAbsolutePath()
-                + " (" + vehicleRepository.findAll().size() + " vehicles).");
-        System.out.println("RentalService is ready. State will be saved to " + snapshotPath.toAbsolutePath()
-                + " on exit.");
+        System.out.println("Loading fleet from " + snapshotPath.toAbsolutePath()
+                + "; requests will block until loading completes.");
     }
 }

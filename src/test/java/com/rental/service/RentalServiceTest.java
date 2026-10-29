@@ -45,6 +45,8 @@ class RentalServiceTest {
         vehicleRepository.addVehicle(new Vehicle("sedan-2", VehicleType.SEDAN));
         vehicleRepository.addVehicle(new Vehicle("suv-1", VehicleType.SUV));
         vehicleRepository.addVehicle(new Vehicle("van-1", VehicleType.VAN));
+
+        rentalService.markReady();
     }
 
     @Test
@@ -234,5 +236,41 @@ class RentalServiceTest {
 
         assertTrue(finished);
         assertEquals(2, successCount.get());
+    }
+
+    /**
+     * reserve/cancel/isAvailable must block until markReady() is called, so a fleet
+     * load running on another thread (see com.rental.Main) can't race with callers
+     * that start hitting the service before the initial data is in place.
+     */
+    @Test
+    void operationsBlockUntilMarkReadyIsCalled() throws InterruptedException {
+        VehicleRepository freshVehicles = new InMemoryVehicleRepository();
+        ReservationRepository freshReservations = new InMemoryReservationRepository(freshVehicles);
+        RentalService notYetReady = new RentalService(freshVehicles, freshReservations);
+        freshVehicles.addVehicle(new Vehicle("van-9", VehicleType.VAN));
+
+        CountDownLatch callerStarted = new CountDownLatch(1);
+        CountDownLatch callerFinished = new CountDownLatch(1);
+        AtomicInteger resultHolder = new AtomicInteger(-1);
+
+        Thread caller = new Thread(() -> {
+            callerStarted.countDown();
+            boolean available = notYetReady.isAvailable(VehicleType.VAN, BASE, BASE.plusDays(1));
+            resultHolder.set(available ? 1 : 0);
+            callerFinished.countDown();
+        });
+        caller.start();
+
+        assertTrue(callerStarted.await(2, TimeUnit.SECONDS));
+        // The caller is blocked on the latch; give it a moment to prove it hasn't finished.
+        assertFalse(callerFinished.await(300, TimeUnit.MILLISECONDS),
+                "isAvailable should still be blocked before markReady() is called");
+
+        notYetReady.markReady();
+
+        assertTrue(callerFinished.await(2, TimeUnit.SECONDS), "call should complete once markReady() runs");
+        assertEquals(1, resultHolder.get());
+        caller.join();
     }
 }
