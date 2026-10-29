@@ -1,8 +1,8 @@
 package com.rental.repository;
 
-import com.rental.datastructure.IntervalTree;
 import com.rental.exception.ReservationNotFoundException;
 import com.rental.model.Reservation;
+import com.rental.model.Vehicle;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -12,21 +12,24 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Overlap queries are backed by one IntervalTree per vehicle (see
- * com.rental.datastructure.IntervalTree), giving O(log r) overlap checks against that
- * vehicle's own reservations instead of a linear scan of the entire reservation table.
- * Cancelling a reservation removes it from its vehicle's tree so cancelled bookings never
- * contribute to future overlap checks.
+ * Overlap queries are delegated to each Reservation's Vehicle, which owns its own
+ * IntervalTree of reservations (see com.rental.model.Vehicle), giving O(log r) overlap
+ * checks against that vehicle's own reservations instead of a linear scan of the entire
+ * reservation table. Cancelling a reservation removes it from its vehicle's tree so
+ * cancelled bookings never contribute to future overlap checks.
  */
 public class InMemoryReservationRepository implements ReservationRepository {
     private final Map<String, Reservation> reservationsById = new ConcurrentHashMap<>();
-    private final Map<String, IntervalTree<Reservation>> treesByVehicleId = new ConcurrentHashMap<>();
+    private final VehicleRepository vehicleRepository;
+
+    public InMemoryReservationRepository(VehicleRepository vehicleRepository) {
+        this.vehicleRepository = vehicleRepository;
+    }
 
     @Override
     public void save(Reservation reservation) {
         reservationsById.put(reservation.getId(), reservation);
-        treeFor(reservation.getVehicleId())
-                .insert(reservation.getStart(), reservation.getEnd(), reservation.getId(), reservation);
+        vehicleOf(reservation).addReservation(reservation);
     }
 
     @Override
@@ -36,10 +39,7 @@ public class InMemoryReservationRepository implements ReservationRepository {
             throw new ReservationNotFoundException("No reservation with id " + reservationId);
         }
         reservation.cancel();
-        IntervalTree<Reservation> tree = treesByVehicleId.get(reservation.getVehicleId());
-        if (tree != null) {
-            tree.remove(reservation.getStart(), reservation.getId());
-        }
+        vehicleOf(reservation).removeReservation(reservation);
     }
 
     @Override
@@ -60,8 +60,9 @@ public class InMemoryReservationRepository implements ReservationRepository {
 
     @Override
     public boolean hasOverlap(String vehicleId, LocalDateTime start, LocalDateTime end) {
-        IntervalTree<Reservation> tree = treesByVehicleId.get(vehicleId);
-        return tree != null && tree.hasOverlap(start, end);
+        return vehicleRepository.findById(vehicleId)
+                .map(vehicle -> vehicle.hasOverlap(start, end))
+                .orElse(false);
     }
 
     @Override
@@ -69,7 +70,9 @@ public class InMemoryReservationRepository implements ReservationRepository {
         return new ArrayList<>(reservationsById.values());
     }
 
-    private IntervalTree<Reservation> treeFor(String vehicleId) {
-        return treesByVehicleId.computeIfAbsent(vehicleId, id -> new IntervalTree<>());
+    private Vehicle vehicleOf(Reservation reservation) {
+        return vehicleRepository.findById(reservation.getVehicleId())
+                .orElseThrow(() -> new IllegalStateException(
+                        "No vehicle registered with id " + reservation.getVehicleId()));
     }
 }

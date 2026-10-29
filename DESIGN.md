@@ -16,16 +16,21 @@ and concurrency correctness, not I/O.
                        │  SEDAN, SUV, VAN   │
                        └─────────▲──────────┘
                                  │
-                       ┌─────────┴──────────┐
-                       │      Vehicle        │
-                       │  id: String         │
-                       │  type: VehicleType  │
-                       └─────────▲──────────┘
+                       ┌─────────┴────────────────────┐
+                       │          Vehicle               │
+                       │  id: String                    │
+                       │  type: VehicleType              │
+                       │  reservations: IntervalTree<Res> │
+                       │  addReservation(r)              │
+                       │  removeReservation(r)           │
+                       │  hasOverlap(s, e)               │
+                       └─────────▲────────────────────┘
                                  │ reserved as
                        ┌─────────┴──────────┐
                        │    Reservation      │
                        │  id: String         │
                        │  vehicleId: String  │
+                       │  vehicleType         │
                        │  customerId: String │
                        │  start, end         │
                        │  status             │
@@ -34,15 +39,18 @@ and concurrency correctness, not I/O.
                                  │ reads/writes
         ┌────────────────────────┴───────────────────────┐
         │                                                  │
-┌───────┴────────────┐                          ┌──────────┴───────────┐
-│ VehicleRepository    │                          │ ReservationRepository │
-│  (interface)         │                          │  (interface)          │
-│  findByType(type)     │                          │  hasOverlap(id,s,e)   │
-│  addVehicle(v)        │                          │  save(r) / cancel(id) │
-└───────▲──────────────┘                          └───────────▲───────────┘
+┌───────┴────────────────┐                      ┌──────────┴───────────┐
+│ VehicleRepository        │                      │ ReservationRepository │
+│  (interface)             │                      │  (interface)          │
+│  findByType(type) [O(1)] │                      │  hasOverlap(id,s,e)   │
+│  findById(id)            │                      │  save(r) / cancel(id) │
+│  addVehicle(v)            │                      │                       │
+└───────▲──────────────────┘                      └───────────▲───────────┘
         │ implements                                           │ implements
 ┌───────┴──────────────┐                          ┌────────────┴───────────┐
-│InMemoryVehicleRepo    │                          │InMemoryReservationRepo  │
+│InMemoryVehicleRepo    │◄─────────────────────────│InMemoryReservationRepo  │
+│ vehiclesByType: Map    │   resolves Vehicle by id │ (delegates tree ops    │
+│ vehiclesById: Map      │                          │  to Vehicle itself)    │
 └───────────────────────┘                          └─────────────────────────┘
 
                        ┌─────────────────────────┐
@@ -63,13 +71,43 @@ and concurrency correctness, not I/O.
 | Class | Responsibility |
 |---|---|
 | `VehicleType` | Enum of SEDAN / SUV / VAN. No behavioral differences between types justify subclassing — a car's "type" is an attribute, not a different shape of object. |
-| `Vehicle` | Identity + category of one physical car. Immutable value-ish entity. |
-| `Reservation` | One booking: which vehicle, which customer, `[start, end)` interval, status. Owns the overlap predicate — the core domain rule lives next to the data it operates on. |
-| `VehicleRepository` / `InMemoryVehicleRepository` | The finite fleet. Lookup by type. |
-| `ReservationRepository` / `InMemoryReservationRepository` | Stores bookings; answers "does vehicle X have an active reservation overlapping [s, e)?" |
-| `RentalService` | The only class that knows the business rule "to book a type, find a vehicle of that type with no overlapping active reservation, then create the reservation" — and the only class that takes locks. Everything above it is dumb storage. |
+| `Vehicle` | Identity + category of one physical car, **and** that car's own reservation history, held as its own `IntervalTree<Reservation>` (see §7). A vehicle's bookings are intrinsically its own state, not a cross-cutting index owned by a separate repository. |
+| `Reservation` | One booking: which vehicle (id + type), which customer, `[start, end)` interval, status. Owns the overlap predicate — the core domain rule lives next to the data it operates on. |
+| `VehicleRepository` / `InMemoryVehicleRepository` | The finite fleet: identity and type lookup only, grouped by type at insertion time so `findByType` is `O(1)` instead of scanning every vehicle on each call. Knows nothing about bookings. |
+| `ReservationRepository` / `InMemoryReservationRepository` | The master list of reservations by id, for `findById`/`findAll`/audit purposes. For overlap checks and mutating a vehicle's booking state, it resolves the `Vehicle` via `VehicleRepository` and delegates to that vehicle's own tree — it does not keep a second parallel index of bookings per vehicle. |
+| `RentalService` | The only class that knows the business rule "to book a type, find a vehicle of that type with no overlapping active reservation, then create the reservation" — and the only class that takes locks. |
 
 I deliberately did not create a `Customer` class (a bare `customerId: String` is enough for this exercise), and did not create three `Sedan`/`Suv`/`Van` subclasses, since nothing in the problem statement gives them distinct behavior.
+
+### Why `Vehicle` owns its own reservation tree, not a separate repository-side map
+
+An earlier version kept `Vehicle` as a small immutable value (id + type) and had
+`InMemoryReservationRepository` maintain a second map, `Map<String,
+IntervalTree<Reservation>>`, keyed by vehicle id, mirroring the vehicle roster. That
+meant two structures — `VehicleRepository`'s roster and `ReservationRepository`'s
+per-vehicle tree map — had to stay in sync by vehicle id with no enforced
+relationship between them.
+
+Moving the tree onto `Vehicle` itself removes that duplication: a vehicle's identity
+and its booking history are now one object, reached through one lookup
+(`vehicleRepository.findById(id)`) instead of two parallel maps. The tradeoff,
+accepted deliberately: `Vehicle` is no longer a pure immutable value — it now carries
+mutable, frequently-changing state (its tree), so handing out `Vehicle` references
+outside of `RentalService`'s per-type lock is no longer as inherently safe as handing
+out plain id+type data would be. For this exercise's scope, that's an acceptable
+trade for removing a redundant, independently-maintained index.
+
+An alternative floated and rejected during design: giving every vehicle a sentinel
+"free" reservation at a far-future placeholder date (e.g. year 7026) so that a single
+shared interval structure per type could double as both the fleet roster and the
+booking index. Rejected because (a) a shared tree's overlap hit on one busy vehicle
+doesn't tell you anything about whether a *different* vehicle of that type is free,
+so it can't actually answer "is any vehicle of this type available" without still
+iterating vehicles individually, and (b) it mixes fictitious placeholder data into a
+structure meant to hold only real reservations, requiring every consumer (overlap
+queries, `findAll`, cancellation) to know to filter it out — the same contamination
+risk that motivated keeping `VehicleRepository` and `ReservationRepository` as
+separate concerns in the first place.
 
 ## 3. Core business rule: overlap test
 
@@ -260,19 +298,20 @@ and filtered by vehicle ID and overlap on each call — `O(V × R)` for `V`
 candidates and `R` total reservations, with `R` growing unboundedly over the
 system's lifetime.
 
-`InMemoryReservationRepository` now keeps one
-`com.rental.datastructure.IntervalTree` per vehicle instead: an augmented
-AVL tree keyed by `start`, where every node also stores `maxEnd` — the
-largest `end` value anywhere in its subtree. During a search, a subtree is
-pruned without being visited whenever its `maxEnd` cannot reach the query's
-`start`, which is what makes `hasOverlap` and `findOverlapping` run in
-`O(log r)` against that vehicle's own reservation count `r`, instead of
-scanning all of them, and independent of total system-wide reservation
-count `R`. Insert and remove are also `O(log r)`, via standard AVL
-rotations with `maxEnd` recomputed bottom-up along the rotation path.
+Each `Vehicle` now owns one `com.rental.datastructure.IntervalTree` of its
+own reservations instead: an augmented AVL tree keyed by `start`, where
+every node also stores `maxEnd` — the largest `end` value anywhere in its
+subtree. During a search, a subtree is pruned without being visited
+whenever its `maxEnd` cannot reach the query's `start`, which is what makes
+`hasOverlap` and `findOverlapping` run in `O(log r)` against that vehicle's
+own reservation count `r`, instead of scanning all of them, and independent
+of total system-wide reservation count `R`. Insert and remove are also
+`O(log r)`, via standard AVL rotations with `maxEnd` recomputed bottom-up
+along the rotation path. `ReservationRepository.hasOverlap(vehicleId, ...)`
+resolves the vehicle via `VehicleRepository` and delegates straight to it.
 
 Cancelling a reservation (`ReservationRepository.cancel`) removes it from
-its vehicle's tree so a cancelled booking stops contributing to future
+its vehicle's own tree so a cancelled booking stops contributing to future
 overlap checks, rather than leaving a stale "cancelled but still indexed"
 entry that would require every read to re-check `isActive()`.
 

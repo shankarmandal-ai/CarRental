@@ -38,7 +38,7 @@ class RentalServiceTest {
     @BeforeEach
     void setUp() {
         vehicleRepository = new InMemoryVehicleRepository();
-        reservationRepository = new InMemoryReservationRepository();
+        reservationRepository = new InMemoryReservationRepository(vehicleRepository);
         rentalService = new RentalService(vehicleRepository, reservationRepository);
 
         vehicleRepository.addVehicle(new Vehicle("sedan-1", VehicleType.SEDAN));
