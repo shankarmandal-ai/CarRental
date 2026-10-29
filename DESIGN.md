@@ -339,7 +339,45 @@ against a brute-force linear scan over the same live intervals, to verify
 the AVL rotations and `maxEnd` augmentation stay correct under arbitrary
 mutation sequences, not just the hand-picked scenarios.
 
-## 8. Validation and errors
+## 8. Persistence: `FleetSnapshot`
+
+`com.rental.persistence.FleetSnapshot` saves and loads the fleet and its
+active bookings as a flat CSV, one row per active reservation (or one bare
+row for a vehicle with zero bookings, so it isn't lost):
+
+```
+vehicleId,type,customerId,start,end     (one row per active reservation)
+vehicleId,type                          (a vehicle with zero bookings)
+```
+
+Only `CONFIRMED` reservations are persisted; cancelled ones are dropped on
+save and simply don't exist after reload — there's no cancellation history
+across a restart with this format. Reservation ids aren't persisted either,
+since nothing in this snapshot format depends on the original id; a
+reloaded reservation gets a freshly generated id.
+
+**Nothing about `IntervalTree`'s internal structure (node layout, AVL
+balance) is ever serialized.** The tree is a derived index, not source
+data: on `load`, each row is replayed through the exact same `Vehicle.addVehicle`
+/ `ReservationRepository.save` path that a live `reserve()` call uses, which
+rebuilds each vehicle's tree identically from the flat reservation list.
+This is deliberate — serializing tree internals directly would be fragile
+across any future change to `IntervalTree`'s shape and wouldn't buy
+anything, since rebuilding from the flat list is already `O(r log r)` per
+vehicle and runs once at startup.
+
+`Main` wires this at the process boundary: it loads the snapshot (if the
+file exists; a missing file is a no-op, not an error) before constructing
+`RentalService`, and registers a JVM shutdown hook that saves current state
+back to the same path on exit — including `Ctrl+C`/`SIGTERM`, not just a
+normal return from `main`. This is a best-effort save, not a transaction
+log: a hard kill (`kill -9`) or a crash between bookings and the next save
+loses whatever happened since the last successful save, which is acceptable
+for this exercise but would need a real write-ahead approach (e.g. append
+each booking/cancellation as it happens, rather than snapshotting the whole
+fleet at exit) for anything production-grade — see §11.
+
+## 9. Validation and errors
 
 `RentalService.reserve` validates before taking any lock: type and customer
 id required, start required, `endTime` required and after `start`. Violations throw
@@ -349,7 +387,7 @@ nonexistent reservation throws `ReservationNotFoundException`. All three are
 unchecked — this is an interview-scope simulation, not a library with a
 checked-exception contract.
 
-## 9. Test coverage (`src/test/java`)
+## 10. Test coverage (`src/test/java`)
 
 - `ReservationTest` — the overlap predicate itself: identical, partial-start,
   partial-end, boundary-touching (non-overlap), disjoint, invalid interval
@@ -357,6 +395,10 @@ checked-exception contract.
 - `IntervalTreeTest` — insert/remove/overlap/findOverlapping correctness,
   half-open boundary semantics, duplicate-id rejection, and a 5,000-iteration
   randomized cross-check against brute-force linear scan.
+- `FleetSnapshotTest` — round-trips vehicles and active bookings through a
+  CSV file and rebuilds a working overlap index (not just flat records);
+  cancelled reservations are confirmed absent after reload; a vehicle with
+  no bookings survives as a bare row; loading a missing file is a no-op.
 - `RentalServiceTest`:
   - happy path booking, distinct vehicles for concurrent non-conflicting
     requests of the same type
@@ -371,10 +413,12 @@ checked-exception contract.
 
 Run with `mvn test` (JDK 17+, Maven 3.9+).
 
-## 10. What I'd add for production (out of scope here)
+## 11. What I'd add for production (out of scope here)
 
-- Persistence with DB-enforced overlap exclusion (see §6) instead of/in
-  addition to the in-memory lock.
+- A real write-ahead persistence mechanism (append each booking/cancellation
+  as it happens) instead of a best-effort snapshot-on-exit (see §8), plus
+  DB-enforced overlap exclusion (see §6) instead of/in addition to the
+  in-memory lock.
 - Pricing, customer accounts, payment.
 - Pagination/filtering on vehicle search once fleets are large.
 - Idempotency keys on `reserve` for safe client retries.
