@@ -451,7 +451,26 @@ checked-exception contract.
 
 Run with `mvn test` (JDK 17+, Maven 3.9+).
 
-## 12. What I'd add for production (out of scope here)
+## 12. Multi-terminal access: `RentalCommandServer`
+
+`com.rental.server.RentalCommandServer` is a plain-text line protocol over
+TCP, letting several terminals issue `RESERVE`/`CANCEL`/`AVAILABLE`/`QUIT`
+commands against one running process. Each accepted connection is handled
+on its own thread from a cached pool, but all connections call into the
+exact same `RentalService` instance — concurrency safety comes entirely
+from `RentalService`'s own per-type locks (§6) and startup latch (§9); the
+server adds no locking of its own, because it doesn't need to; the
+invariant it depends on already lives at the right layer.
+
+`Main` starts the server after constructing `RentalService` and keeps the
+process alive (`Thread.currentThread().join()`) until killed, at which
+point the same shutdown hook used for persistence (§8) saves current state.
+This is intentionally a minimal line protocol (no framing beyond newlines,
+no auth, no reconnect/backoff) — adequate for demonstrating that the
+service is safe under concurrent multi-client access, not a production
+wire protocol.
+
+## 13. What I'd add for production (out of scope here)
 
 - A real write-ahead persistence mechanism (append each booking/cancellation
   as it happens) instead of a best-effort snapshot-on-exit (see §8), plus
@@ -460,3 +479,5 @@ Run with `mvn test` (JDK 17+, Maven 3.9+).
 - Pricing, customer accounts, payment.
 - Pagination/filtering on vehicle search once fleets are large.
 - Idempotency keys on `reserve` for safe client retries.
+- A real wire protocol (HTTP/gRPC, auth, structured errors) instead of the
+  plain-text TCP line protocol in §12.
