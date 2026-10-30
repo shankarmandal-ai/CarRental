@@ -165,7 +165,7 @@ class RentalServiceTest {
      * Concurrency correctness: with only one VAN in the fleet, fire many concurrent
      * overlapping requests for it. Exactly one must succeed; all others must fail with
      * NoVehicleAvailableException. This proves the check-then-act race is closed by the
-     * per-type lock in RentalService.
+     * per-vehicle lock in RentalService.
      */
     @Test
     void concurrentOverlappingRequestsForScarceVehicleYieldExactlyOneWinner() throws InterruptedException {
@@ -212,7 +212,7 @@ class RentalServiceTest {
 
     /**
      * Concurrent requests for *different* vehicle types must not block each other
-     * (the lock is per-type, not global) and both should succeed.
+     * (locking is per-vehicle, never global or per-type) and both should succeed.
      */
     @Test
     void concurrentRequestsForDifferentTypesBothSucceed() throws InterruptedException {
@@ -236,6 +236,35 @@ class RentalServiceTest {
 
         assertTrue(finished);
         assertEquals(2, successCount.get());
+    }
+
+    /**
+     * The granularity per-vehicle locking buys over per-type locking: two concurrent
+     * requests for the *same* type that land on two *different* vehicles must both succeed
+     * without either blocking on the other's lock. (Both sedans exist and are idle at setup.)
+     */
+    @Test
+    void concurrentRequestsForSameTypeOnDifferentVehiclesBothSucceed() throws InterruptedException {
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch doneLatch = new CountDownLatch(2);
+        Set<String> wonVehicleIds = new ConcurrentSkipListSet<>();
+
+        executor.submit(() -> {
+            Reservation r = rentalService.reserve(VehicleType.SEDAN, "cust-a", BASE, BASE.plusDays(1));
+            wonVehicleIds.add(r.getVehicleId());
+            doneLatch.countDown();
+        });
+        executor.submit(() -> {
+            Reservation r = rentalService.reserve(VehicleType.SEDAN, "cust-b", BASE, BASE.plusDays(1));
+            wonVehicleIds.add(r.getVehicleId());
+            doneLatch.countDown();
+        });
+
+        boolean finished = doneLatch.await(10, TimeUnit.SECONDS);
+        executor.shutdown();
+
+        assertTrue(finished);
+        assertEquals(2, wonVehicleIds.size(), "both sedans should be booked by two different winners");
     }
 
     /**
@@ -272,5 +301,123 @@ class RentalServiceTest {
         assertTrue(callerFinished.await(2, TimeUnit.SECONDS), "call should complete once markReady() runs");
         assertEquals(1, resultHolder.get());
         caller.join();
+    }
+
+    /**
+     * pause()/resume() must be reusable, unlike the one-shot startup gate: a call blocks
+     * while paused, resume() releases it, and a second pause()/resume() cycle must work
+     * identically (proving the gate isn't a one-time latch).
+     */
+    @Test
+    void operationsBlockUntilResumeIsCalledAndGateIsReusable() throws InterruptedException {
+        rentalService.pause();
+
+        CountDownLatch callerStarted = new CountDownLatch(1);
+        CountDownLatch callerFinished = new CountDownLatch(1);
+        AtomicInteger resultHolder = new AtomicInteger(-1);
+
+        Thread caller = new Thread(() -> {
+            callerStarted.countDown();
+            boolean available = rentalService.isAvailable(VehicleType.VAN, BASE, BASE.plusDays(1));
+            resultHolder.set(available ? 1 : 0);
+            callerFinished.countDown();
+        });
+        caller.start();
+
+        assertTrue(callerStarted.await(2, TimeUnit.SECONDS));
+        assertFalse(callerFinished.await(300, TimeUnit.MILLISECONDS),
+                "isAvailable should still be blocked while paused");
+
+        rentalService.resume();
+
+        assertTrue(callerFinished.await(2, TimeUnit.SECONDS), "call should complete once resume() runs");
+        assertEquals(1, resultHolder.get());
+        caller.join();
+
+        // Second pause/resume cycle must behave the same way - proves the gate is reusable.
+        rentalService.pause();
+
+        CountDownLatch secondCallerStarted = new CountDownLatch(1);
+        CountDownLatch secondCallerFinished = new CountDownLatch(1);
+
+        Thread secondCaller = new Thread(() -> {
+            secondCallerStarted.countDown();
+            rentalService.isAvailable(VehicleType.VAN, BASE, BASE.plusDays(1));
+            secondCallerFinished.countDown();
+        });
+        secondCaller.start();
+
+        assertTrue(secondCallerStarted.await(2, TimeUnit.SECONDS));
+        assertFalse(secondCallerFinished.await(300, TimeUnit.MILLISECONDS),
+                "isAvailable should block again on the second pause() cycle");
+
+        rentalService.resume();
+
+        assertTrue(secondCallerFinished.await(2, TimeUnit.SECONDS));
+        secondCaller.join();
+    }
+
+    @Test
+    void resumeWithoutPauseIsANoOpAndOperationsProceedNormally() {
+        rentalService.resume();
+
+        assertTrue(rentalService.isAvailable(VehicleType.SUV, BASE, BASE.plusDays(1)));
+    }
+
+    /**
+     * pause() shares one CountDownLatch-based gate with the startup wait (see RentalService's
+     * class-level note): swapping that latch before markReady() has ever fired would orphan
+     * the original latch and deadlock the service permanently, since markReady() only ever
+     * counts down once. pause() must refuse to run before markReady() rather than risk that.
+     */
+    @Test
+    void pauseBeforeMarkReadyThrows() {
+        VehicleRepository freshVehicles = new InMemoryVehicleRepository();
+        ReservationRepository freshReservations = new InMemoryReservationRepository(freshVehicles);
+        RentalService notYetReady = new RentalService(freshVehicles, freshReservations);
+
+        assertThrows(IllegalStateException.class, notYetReady::pause);
+    }
+
+    /**
+     * freeVehiclesByType is a fast path: a vehicle with zero reservations is handed out
+     * without any tree query. Once every vehicle of a type has at least one booking, the
+     * free set is empty and reserve() must fall back to the normal overlap scan - this
+     * proves that fallback still finds a vehicle that's free for the *requested* interval
+     * even though no vehicle is free unconditionally.
+     */
+    @Test
+    void fallsBackToOverlapScanOnceNoVehicleIsUnconditionallyFree() {
+        // Book sedan-1 and sedan-2 for different, non-overlapping periods so neither
+        // vehicle has an empty reservation tree anymore - the free-set fast path is exhausted.
+        rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, BASE.plusDays(1));
+        rentalService.reserve(VehicleType.SEDAN, "cust-2", BASE.plusDays(10), BASE.plusDays(11));
+
+        // Neither sedan is unconditionally free anymore, but sedan-1 is free for this
+        // later period (it only has a booking on day 0-1), so the overlap scan must find it.
+        Reservation r = rentalService.reserve(VehicleType.SEDAN, "cust-3", BASE.plusDays(2), BASE.plusDays(3));
+
+        assertNotNull(r);
+        assertTrue(r.getVehicleId().startsWith("sedan"));
+    }
+
+    /**
+     * Cancelling a vehicle's only reservation must make it eligible for the free-set fast
+     * path again: book both sedans, cancel one, then confirm a fresh request for an
+     * unrelated period still succeeds (the cancelled vehicle is available for anything).
+     */
+    @Test
+    void cancellingAVehiclesOnlyReservationRestoresItToFreeFastPath() {
+        Reservation r1 = rentalService.reserve(VehicleType.SEDAN, "cust-1", BASE, BASE.plusDays(1));
+        Reservation r2 = rentalService.reserve(VehicleType.SEDAN, "cust-2", BASE.plusDays(1), BASE.plusDays(2));
+        assertNotEqualsVehicle(r1, r2);
+
+        rentalService.cancel(r1.getId());
+
+        // r1's vehicle has no reservations again - it should be available for a period far
+        // from anything previously booked, proving it rejoined the free set rather than
+        // requiring an overlap check to discover it's free.
+        Reservation r3 = rentalService.reserve(VehicleType.SEDAN, "cust-3", BASE.plusDays(100), BASE.plusDays(101));
+        assertEquals(r1.getVehicleId(), r3.getVehicleId());
     }
 }

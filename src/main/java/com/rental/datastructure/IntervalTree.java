@@ -16,7 +16,7 @@ import java.util.Objects;
  * nodes; id breaks ties and identifies which stored interval to remove.
  *
  * Not thread-safe by itself — callers serialize access externally (see
- * RentalService's per-type lock), the same way a plain TreeMap would need to be.
+ * RentalService's per-vehicle lock), the same way a plain TreeMap would need to be.
  */
 public final class IntervalTree<T> {
 

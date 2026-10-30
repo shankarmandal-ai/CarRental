@@ -22,7 +22,7 @@ import java.util.concurrent.Executors;
 /**
  * Plain-text line protocol over TCP so multiple terminals can issue requests against one
  * shared RentalService at once. Each accepted connection runs on its own thread from an
- * unbounded cached pool; RentalService's own per-type locks and readyLatch are what make
+ * unbounded cached pool; RentalService's own per-vehicle locks and readyLatch are what make
  * concurrent access from many connections safe, not anything in this class.
  *
  * Commands (one per line):

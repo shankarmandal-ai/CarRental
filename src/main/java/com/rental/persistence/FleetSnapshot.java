@@ -19,12 +19,13 @@ import java.util.List;
  * Flat-CSV persistence of the fleet and its active bookings, one row per reservation
  * (or one bare row per vehicle with no bookings, so an empty vehicle isn't lost):
  *
- *   vehicleId,type,customerId,start,end     (one row per active reservation)
- *   vehicleId,type                           (a vehicle with zero bookings)
+ *   vehicleId,type,reservationId,customerId,start,end   (one row per active reservation)
+ *   vehicleId,type                                       (a vehicle with zero bookings)
  *
  * Only CONFIRMED reservations are persisted — cancelled bookings are not restored on
- * reload. Reservation ids are not persisted; reloaded reservations get freshly
- * generated ids, since nothing in this snapshot format depends on the original id.
+ * reload. The reservation id IS persisted and restored as-is on reload: a client that
+ * booked before a restart must still be able to CANCEL using the same id afterward, so
+ * reloaded reservations are reconstructed with their original id rather than a fresh one.
  */
 public final class FleetSnapshot {
 
@@ -49,6 +50,7 @@ public final class FleetSnapshot {
                     writer.write(String.join(DELIMITER,
                             vehicle.getId(),
                             vehicle.getType().toString(),
+                            reservation.getId(),
                             reservation.getCustomerId(),
                             reservation.getStart().toString(),
                             reservation.getEnd().toString()));
@@ -97,9 +99,10 @@ public final class FleetSnapshot {
             return; // vehicle with no bookings
         }
 
-        String customerId = fields[2];
-        LocalDateTime start = LocalDateTime.parse(fields[3]);
-        LocalDateTime end = LocalDateTime.parse(fields[4]);
-        reservationRepository.save(new Reservation(vehicleId, type, customerId, start, end));
+        String reservationId = fields[2];
+        String customerId = fields[3];
+        LocalDateTime start = LocalDateTime.parse(fields[4]);
+        LocalDateTime end = LocalDateTime.parse(fields[5]);
+        reservationRepository.save(new Reservation(reservationId, vehicleId, type, customerId, start, end));
     }
 }

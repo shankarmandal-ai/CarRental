@@ -1,41 +1,33 @@
 # Car Rental System
 
-Simulated in-memory car rental reservation system in Java. The fleet and
-active bookings are persisted to [fleet.csv](fleet.csv) across restarts, and
-a TCP command server lets multiple terminals issue requests against one
-shared `RentalService` at once.
+In-memory car rental reservation system in Java. Fleet and bookings persist
+to [fleet.csv](fleet.csv); a TCP server lets multiple terminals issue
+requests against one running instance.
 
-## Build & test
+## Build
 
 ```
-mvn test
+mvn clean package -DskipTests
 ```
 
 ## Run
 
 ```
-mvn -q package -DskipTests
 java -cp target/classes com.rental.Main [path-to-fleet.csv] [port]
 ```
 
-Defaults to `fleet.csv` in the current directory and port `9090` if omitted
-(a missing CSV just starts with an empty fleet). The process stays running
-until killed (Ctrl+C), and the shutdown hook saves current state back to
-the CSV on exit — including the normal `kill`/SIGTERM path, not just a
-clean return from `main`.
+Defaults: `fleet.csv` in the current directory, port `9090`. Stays running
+until killed (Ctrl+C); saves state back to the CSV on exit.
 
-### Connecting from multiple terminals
+## Use
 
-Each terminal opens its own TCP connection to the same running server and
-shares the one `RentalService` instance — `RentalService`'s per-type locks
-and startup latch are what make concurrent requests from different
-terminals safe, not anything in the server itself.
+Connect from any terminal:
 
 ```
 nc localhost 9090
 ```
 
-(or `telnet localhost 9090`). Commands, one per line:
+Commands (one per line):
 
 ```
 RESERVE <TYPE> <customerId> <startISO> <endISO>
@@ -44,8 +36,17 @@ AVAILABLE <TYPE> <startISO> <endISO>
 QUIT
 ```
 
-`<TYPE>` is `SEDAN`, `SUV`, or `VAN`. Dates are ISO-8601 local date-times,
-e.g. `2026-11-01T10:00`. Example session:
+`<TYPE>` is `SEDAN`, `SUV`, or `VAN`. Dates are ISO-8601, e.g.
+`2026-11-01T10:00`.
+
+Examples:
+
+```
+RESERVE SEDAN cust-1 2026-11-05T10:00 2026-11-06T10:00
+CANCEL 3f1e2b4a-...
+AVAILABLE VAN 2026-11-10T09:00 2026-11-12T09:00
+QUIT
+```
 
 ```
 $ nc localhost 9090
@@ -58,18 +59,27 @@ QUIT
 OK bye
 ```
 
+## Test
+
+```
+mvn test
+```
+
+Run a single test class or method:
+
+```
+mvn test -Dtest=RentalServiceTest
+mvn test -Dtest=RentalServiceTest#concurrentRequestsForSameTypeOnDifferentVehiclesBothSucceed
+```
+
 ## Layout
 
-- `src/main/java/com/rental/model` — `Vehicle` (owns its own reservation `IntervalTree`), `VehicleType`, `Reservation`, `ReservationStatus`
-- `src/main/java/com/rental/datastructure` — `IntervalTree`, the augmented AVL tree behind overlap queries
-- `src/main/java/com/rental/repository` — `VehicleRepository`, `ReservationRepository` and in-memory implementations
-- `src/main/java/com/rental/persistence` — `FleetSnapshot`, CSV save/load of the fleet and active bookings
-- `src/main/java/com/rental/server` — `RentalCommandServer`, the TCP line-protocol server
-- `src/main/java/com/rental/service` — `RentalService`, the orchestrator and lock owner
-- `src/main/java/com/rental/exception` — domain exceptions
-- `src/main/java/com/rental/Main.java` — entry point: loads the snapshot, starts the server, saves on shutdown
-- `src/test/java` — unit tests, including a concurrency stress test and a snapshot round-trip test
-- `fleet.csv` — sample/default fleet snapshot used by `Main` when no path is given
+- `model` — `Vehicle`, `VehicleType`, `Reservation`, `ReservationStatus`
+- `datastructure` — `IntervalTree`, the augmented AVL tree behind overlap queries
+- `repository` — `VehicleRepository`, `ReservationRepository`
+- `persistence` — `FleetSnapshot`, CSV save/load
+- `server` — `RentalCommandServer`, the TCP line protocol
+- `service` — `RentalService`, the orchestrator and lock owner
+- `Main.java` — entry point
 
-See [DESIGN.md](DESIGN.md) for the class/sequence diagrams and the locking
-rationale.
+See [DESIGN.md](DESIGN.md) for diagrams and design rationale.

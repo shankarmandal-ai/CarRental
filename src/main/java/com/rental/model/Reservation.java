@@ -20,7 +20,18 @@ public final class Reservation {
 
     public Reservation(String vehicleId, VehicleType vehicleType, String customerId,
                         LocalDateTime start, LocalDateTime end) {
-        this.id = UUID.randomUUID().toString();
+        this(UUID.randomUUID().toString(), vehicleId, vehicleType, customerId, start, end);
+    }
+
+    /**
+     * Reconstructs a reservation with a caller-supplied id, used when reloading from
+     * FleetSnapshot so a reservation keeps the same id it had before the restart - without
+     * this, a reloaded reservation would get a fresh id that was never given to any client,
+     * making it permanently impossible to CANCEL.
+     */
+    public Reservation(String id, String vehicleId, VehicleType vehicleType, String customerId,
+                        LocalDateTime start, LocalDateTime end) {
+        this.id = Objects.requireNonNull(id, "id");
         this.vehicleId = Objects.requireNonNull(vehicleId, "vehicleId");
         this.vehicleType = Objects.requireNonNull(vehicleType, "vehicleType");
         this.customerId = Objects.requireNonNull(customerId, "customerId");

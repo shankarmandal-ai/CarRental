@@ -11,7 +11,7 @@ import java.util.Objects;
  * rather than in a separate per-vehicle map in the reservation repository, since a
  * vehicle's bookings are intrinsically its own state, not a cross-cutting index.
  *
- * Not thread-safe by itself: callers serialize access via RentalService's per-type
+ * Not thread-safe by itself: callers serialize access via RentalService's per-vehicle
  * lock, the same way the tree itself requires external synchronization.
  */
 public final class Vehicle {
@@ -42,6 +42,11 @@ public final class Vehicle {
 
     public boolean hasOverlap(LocalDateTime start, LocalDateTime end) {
         return reservations.hasOverlap(start, end);
+    }
+
+    /** True if this vehicle has zero active reservations — available for any interval. */
+    public boolean hasNoReservations() {
+        return reservations.isEmpty();
     }
 
     public List<Reservation> findOverlapping(LocalDateTime start, LocalDateTime end) {

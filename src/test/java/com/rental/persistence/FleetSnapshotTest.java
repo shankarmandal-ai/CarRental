@@ -65,6 +65,35 @@ class FleetSnapshotTest {
         assertFalse(reloadedVehicles.findById("suv-1").get().hasOverlap(BASE.plusDays(3), BASE.plusDays(4)));
     }
 
+    /**
+     * A reservation's id must survive a save/load round-trip unchanged: a client that
+     * booked before a restart has no way to learn a new id, so if reload minted a fresh
+     * one, that reservation would become permanently impossible to CANCEL.
+     */
+    @Test
+    void reservationIdSurvivesRoundTripAndCanStillBeCancelled() {
+        VehicleRepository vehicleRepository = new InMemoryVehicleRepository();
+        ReservationRepository reservationRepository = new InMemoryReservationRepository(vehicleRepository);
+        vehicleRepository.addVehicle(new Vehicle("van-1", VehicleType.VAN));
+
+        Reservation original = new Reservation("van-1", VehicleType.VAN, "cust-1", BASE, BASE.plusDays(1));
+        reservationRepository.save(original);
+
+        Path snapshotPath = tempDir.resolve("fleet.csv");
+        FleetSnapshot.save(snapshotPath, vehicleRepository, reservationRepository);
+
+        VehicleRepository reloadedVehicles = new InMemoryVehicleRepository();
+        ReservationRepository reloadedReservations = new InMemoryReservationRepository(reloadedVehicles);
+        FleetSnapshot.load(snapshotPath, reloadedVehicles, reloadedReservations);
+
+        assertTrue(reloadedReservations.findById(original.getId()).isPresent(),
+                "reloaded reservation must be found by its original id");
+
+        // The id from before the restart must still work for cancellation.
+        reloadedReservations.cancel(original.getId());
+        assertFalse(reloadedVehicles.findById("van-1").get().hasOverlap(BASE, BASE.plusDays(1)));
+    }
+
     @Test
     void cancelledReservationsAreNotPersisted() {
         VehicleRepository vehicleRepository = new InMemoryVehicleRepository();
